@@ -1,0 +1,1401 @@
+<?php
+require_once __DIR__ . '/../access/access_check1_anime.php';
+
+if (session_status() === PHP_SESSION_NONE) session_start();
+verify_csrf();
+
+// Root directory for all anime content
+define('ANIME_DIR', __DIR__ . '/anime');
+
+// Redirect to a random anime if requested
+if (isset($_GET['random'])) {
+    $dirs = get_anime_list();
+    if ($dirs) {
+        $folder = $dirs[array_rand($dirs)];
+        header('Location: ?anime=' . urlencode($folder));
+        exit;
+    }
+}
+
+define('FEATURED_COUNT', 4);
+
+$ajax    = isset($_POST['ajax']);
+$flashes = get_flashes();
+
+$errors    = [];
+$can_admin = false;
+if (file_exists(__DIR__ . '/../access/access_check2_anime.php')) {
+    ob_start();
+    include __DIR__ . '/../access/access_check2_anime.php';
+    ob_end_clean();
+    $can_admin = (isset($_SESSION['admin_access']) && $_SESSION['admin_access'] === true);
+}
+
+define('ADMIN_USER', 'admin');
+define('ADMIN_PASS', '1234');
+
+function is_admin() {
+    return isset($_SESSION['admin']) && $_SESSION['admin'] === true;
+}
+function safe_name($str) {
+    $name = preg_replace('/[^a-zA-Z0-9_\-ąćęłńóśźżĄĆĘŁŃÓŚŹŻ ]/', '', $str);
+    return trim($name);
+}
+function show_name($s) {
+    return str_replace(['_','-'],' ',$s);
+}
+function h($s){
+    return htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+function sanitize_text($text) {
+    return trim(strip_tags($text));
+}
+function format_episode_title($name) {
+    $title = pathinfo($name, PATHINFO_FILENAME);
+    $title = preg_replace('/\s*-\s*kopia.*$/i', '', $title);
+    $title = preg_replace('/\s*\(\d+\)$/', '', $title);
+    $title = str_replace(['_', '-'], ' ', $title);
+    return trim($title);
+}
+function detect_host($url) {
+    $h = strtolower(preg_replace('/^www\./', '', parse_url($url, PHP_URL_HOST)));
+    if (strpos($h, 'youtu') !== false) return 'YOUTUBE';
+    if (strpos($h, 'cda.pl') !== false) return 'CDA';
+    if (strpos($h, 'drive.google') !== false) return 'GOOGLE';
+    if (strpos($h, 'mega.nz') !== false) return 'MEGA';
+    if (strpos($h, 'vk.com') !== false) return 'VK';
+    if (strpos($h, 'rumble.com') !== false) return 'RUMBLE';
+    if (strpos($h, 'sibnet.ru') !== false) return 'SIBNET';
+    if (strpos($h, 'lulu') !== false) return 'LULU';
+    if (strpos($h, 'mp4upload.com') !== false) return 'MP4UPLOAD';
+    if (strpos($h, 'short.') !== false) return 'SHORT';
+    return strtoupper(preg_replace('/[^a-z0-9]/', '', $h));
+}
+function add_query_param($url, $param) {
+    return strpos($url, '?') === false ? $url.'?'.$param : $url.'&'.$param;
+}
+
+function embed_url($url, $host="") {
+    if (!$host || strtoupper($host) === 'URL') $host = detect_host($url);
+    else $host = strtoupper($host);
+    $embed = $url;
+    if ($host === "YOUTUBE" || strpos($url, "youtube.com") !== false || strpos($url, "youtu.be") !== false) {
+        if (preg_match("/(?:v=|be\/|embed\/)([\w-]+)/", $url, $m)) {
+            $embed = "https://www.youtube.com/embed/" . $m[1];
+        }
+        $embed = add_query_param($embed, 'fs=1');
+    } elseif ($host === "CDA" || strpos($url, "cda.pl") !== false) {
+        if (preg_match("/([\w\d]{8})(?:$|\?)/", $url, $m)) {
+            $embed = "https://ebd.cda.pl/620x368/" . $m[1];
+        }
+        $embed = add_query_param($embed, 'allowfullscreen=1');
+    } elseif ($host === "GOOGLE" || strpos($url, "drive.google.com") !== false) {
+        if (preg_match("/\/d\/([^\/]+)/", $url, $m)) {
+            $embed = "https://drive.google.com/file/d/" . $m[1] . "/preview";
+        }
+        $embed = add_query_param($embed, 'allowfullscreen=1');
+    } elseif ($host === "MEGA" || strpos($url, "mega.nz") !== false) {
+        if (preg_match("/\/file\/([^#]+)#(.+)/", $url, $m)) {
+            $embed = "https://mega.nz/embed/" . $m[1] . "#" . $m[2];
+        }
+        $embed = add_query_param($embed, 'allowfullscreen=1');
+    } elseif ($host === "VK") {
+        $embed = add_query_param($url, 'allowfullscreen=1');
+    } elseif ($host === "RUMBLE") {
+        if (preg_match("/(v[\w]+)/", $url, $m)) {
+            $embed = "https://rumble.com/embed/" . $m[1];
+        }
+        $embed = add_query_param($embed, 'allowfullscreen=1');
+    } elseif ($host === "SIBNET") {
+        if (preg_match("/(?:videoid=|\/)(\d{4,})/", $url, $m)) {
+            $embed = "https://video.sibnet.ru/shell.php?videoid=" . $m[1];
+        }
+        $embed = add_query_param($embed, 'allowfullscreen=1');
+    } elseif ($host === "MP4UPLOAD") {
+        if (preg_match("/[?&]v=([\w]+)/", $url, $m) || preg_match("/\/embed-?([\w]+)/", $url, $m) || preg_match("/\/([\w]+)\.html/", $url, $m)) {
+            $embed = "https://www.mp4upload.com/embed-" . $m[1] . ".html";
+        }
+        $embed = add_query_param($embed, 'allowfullscreen=1');
+    }
+    return $embed;
+}
+function add_flash($type, $msg) {
+
+    $_SESSION['flash'][] = ['type' => $type, 'msg' => $msg];
+}
+function get_flashes() {
+    $flashes = isset($_SESSION['flash']) ? $_SESSION['flash'] : [];
+    unset($_SESSION['flash']);
+    return $flashes;
+}
+function get_csrf_token() {
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf_token'];
+}
+function verify_csrf() {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $token = isset($_SESSION['csrf_token']) ? $_SESSION['csrf_token'] : '';
+        if (!isset($_POST['csrf']) || !hash_equals($token, $_POST['csrf'])) {
+            die('CSRF validation failed');
+        }
+    }
+}
+function get_anime_list() {
+    $dirs = [];
+    if (is_dir(ANIME_DIR)) {
+        foreach (scandir(ANIME_DIR) as $folder) {
+            if ($folder === '.' || $folder === '..') continue;
+            if (is_dir(ANIME_DIR . "/$folder")) $dirs[] = $folder;
+        }
+    }
+    return $dirs;
+}
+function get_episode_files($dir) {
+    $eps = [];
+    $epDir = "$dir/odcinki";
+    if (is_dir($epDir)) {
+        $json = "$epDir/episodes.json";
+        if (file_exists($json)) {
+            $eps = json_decode(file_get_contents($json), true) ?: [];
+        } else {
+            foreach (scandir($epDir) as $ep) {
+                if (pathinfo($ep, PATHINFO_EXTENSION) === 'mp4') {
+                    $eps[] = [
+                        'file' => $ep,
+                        'filename' => $ep,
+                        'title' => format_episode_title($ep),
+                        'audio' => 'PL',
+                        'subs' => 'PL',
+                        'host' => 'LOCAL'
+                    ];
+                }
+            }
+        }
+    }
+    return $eps;
+}
+function load_anime_data($folder) {
+    $dir = ANIME_DIR . '/' . $folder;
+    $meta = ['series' => '', 'season_number' => '', 'prev_season' => '', 'next_season' => ''];
+    if (file_exists("$dir/meta.json")) {
+        $json = json_decode(file_get_contents("$dir/meta.json"), true);
+        if (is_array($json)) {
+            $meta = array_merge($meta, $json);
+        }
+    }
+    return [
+        'title' => $folder,
+        'folder' => $folder,
+        'cover' => file_exists("$dir/cover.png") ? "anime/$folder/cover.png" : "placeholder.jpg",
+        'desc' => file_exists("$dir/description.txt") ? file_get_contents("$dir/description.txt") : '',
+        'genres' => file_exists("$dir/genres.txt") ? file("$dir/genres.txt", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [],
+        'type' => file_exists("$dir/type.txt") ? trim(file_get_contents("$dir/type.txt")) : "TV",
+        'episodes' => get_episode_files($dir),
+        'series' => $meta['series'],
+        'season_number' => $meta['season_number'],
+        'prev_season' => $meta['prev_season'],
+        'next_season' => $meta['next_season']
+    ];
+}
+function get_featured_anime($anime_dirs, $count = FEATURED_COUNT) {
+    $items = [];
+    foreach ($anime_dirs as $folder) {
+        $data = load_anime_data($folder);
+        $items[] = [
+            'folder' => $folder,
+            'title'  => $data['title'],
+            'cover'  => $data['cover'],
+            'count'  => is_array($data['episodes']) ? count($data['episodes']) : 0
+        ];
+    }
+    usort($items, function($a, $b) {
+        if ($a['count'] == $b['count']) {
+            return strcmp($a['title'], $b['title']);
+        }
+        return $b['count'] - $a['count'];
+    });
+    return array_slice($items, 0, $count);
+}
+
+// LOGIN / LOGOUT handlers
+if ($can_admin && isset($_POST['login'], $_POST['pass'])) {
+    if ($_POST['login'] === ADMIN_USER && $_POST['pass'] === ADMIN_PASS) {
+        $_SESSION['admin'] = true;
+        header('Location:?panel=admin');
+        exit;
+    } else {
+        $login_error = "Błędny login lub hasło.";
+    }
+}
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header('Location:./');
+    exit;
+}
+
+if ($can_admin && is_admin()) {
+    // ADD ANIME
+    if (isset($_POST['add_anime'])) {
+        $folder = safe_name($_POST['title']);
+        if ($folder === '') {
+            $errors[] = 'Nieprawidłowa nazwa folderu.';
+        }
+        $path   = ANIME_DIR . "/$folder";
+        if ($folder !== '' && !is_dir($path) && !mkdir($path, 0777, true)) {
+            $errors[] = 'Błąd tworzenia katalogu.';
+        }
+        $desc   = sanitize_text($_POST['desc']);
+        $genres = sanitize_text($_POST['genres']);
+        $type   = sanitize_text($_POST['type']);
+        if (file_put_contents("$path/description.txt", $desc) === false) $errors[] = 'Nie zapisano opisu.';
+        if (file_put_contents("$path/genres.txt", $genres) === false)     $errors[] = 'Nie zapisano tagów.';
+        if (file_put_contents("$path/type.txt", $type) === false)         $errors[] = 'Nie zapisano typu.';
+        $meta = [
+            'series'        => sanitize_text($_POST['series']),
+            'season_number' => sanitize_text($_POST['season_number']),
+            'prev_season'   => sanitize_text($_POST['prev_season']),
+            'next_season'   => sanitize_text($_POST['next_season'])
+        ];
+        if (file_put_contents("$path/meta.json", json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) === false) {
+            $errors[] = 'Nie zapisano meta.';
+        }
+        if (!is_dir("$path/odcinki") && !mkdir("$path/odcinki", 0777, true)) {
+            $errors[] = 'Błąd tworzenia katalogu odcinków.';
+        } else if (!file_exists("$path/odcinki/episodes.json")) {
+            file_put_contents("$path/odcinki/episodes.json", json_encode([], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        }
+        if (!empty($_POST['cover_url'])) {
+            $url = trim($_POST['cover_url']);
+            if (filter_var($url, FILTER_VALIDATE_URL) && preg_match('#^https?://#i', $url)) {
+                $headers = @get_headers($url, 1);
+                $type = is_array($headers) && isset($headers['Content-Type']) ? (is_array($headers['Content-Type']) ? $headers['Content-Type'][0] : $headers['Content-Type']) : '';
+                $data = @file_get_contents($url);
+                if ($data !== false && strpos($type, 'image/') === 0 && file_put_contents("$path/cover.png", $data) !== false) {
+                    // ok
+                } else {
+                    $errors[] = 'Nie zapisano okładki z adresu.';
+                }
+            } else {
+                $errors[] = 'Błędny URL okładki.';
+            }
+        } elseif (!empty($_FILES['cover']['tmp_name'])) {
+            if (!move_uploaded_file($_FILES['cover']['tmp_name'], "$path/cover.png")) {
+                $errors[] = 'Nie przeniesiono okładki.';
+            }
+        }
+        if (empty($errors)) $msg = "Anime dodane: $folder";
+    }
+
+    // EDIT ANIME
+    if (isset($_POST['edit_anime'], $_POST['folder'])) {
+        $folder = safe_name($_POST['folder']);
+        if ($folder === '') {
+            $errors[] = 'Nieprawidłowa nazwa folderu.';
+        }
+        $path = ANIME_DIR . "/$folder";
+        if ($folder !== '' && is_dir($path)) {
+            if (isset($_POST['desc']) && file_put_contents("$path/description.txt", sanitize_text($_POST['desc'])) === false)
+                $errors[] = 'Nie zapisano opisu.';
+            if (isset($_POST['genres']) && file_put_contents("$path/genres.txt", sanitize_text($_POST['genres'])) === false)
+                $errors[] = 'Nie zapisano tagów.';
+            if (isset($_POST['type']) && file_put_contents("$path/type.txt", sanitize_text($_POST['type'])) === false)
+                $errors[] = 'Nie zapisano typu.';
+            $meta = [
+                'series'        => sanitize_text($_POST['series']),
+                'season_number' => sanitize_text($_POST['season_number']),
+                'prev_season'   => sanitize_text($_POST['prev_season']),
+                'next_season'   => sanitize_text($_POST['next_season'])
+            ];
+            if (file_put_contents("$path/meta.json", json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) === false)
+                $errors[] = 'Nie zapisano meta.';
+            if (!empty($_POST['cover_url'])) {
+                $url = trim($_POST['cover_url']);
+                if (filter_var($url, FILTER_VALIDATE_URL) && preg_match('#^https?://#i', $url)) {
+                    $headers = @get_headers($url, 1);
+                    $type = is_array($headers) && isset($headers['Content-Type']) ? (is_array($headers['Content-Type']) ? $headers['Content-Type'][0] : $headers['Content-Type']) : '';
+                    $data = @file_get_contents($url);
+                    if ($data !== false && strpos($type, 'image/') === 0 && file_put_contents("$path/cover.png", $data) !== false) {
+                        // ok
+                    } else {
+                        $errors[] = 'Nie zapisano okładki z adresu.';
+                    }
+                } else {
+                    $errors[] = 'Błędny URL okładki.';
+                }
+            } elseif (!empty($_FILES['cover']['tmp_name'])) {
+                if (!move_uploaded_file($_FILES['cover']['tmp_name'], "$path/cover.png"))
+                    $errors[] = 'Nie przeniesiono okładki.';
+            }
+            if (empty($errors)) $msg = "Anime zaktualizowane: $folder";
+        }
+    }
+
+    // DELETE ANIME
+    if (isset($_POST['del_anime'], $_POST['folder'])) {
+        $folder = safe_name($_POST['folder']);
+        $path = ANIME_DIR . "/$folder";
+        if ($folder !== '' && is_dir($path)) {
+            $iterator = function($dir) use (&$iterator) {
+                foreach (scandir($dir) as $item) {
+                    if ($item === '.' || $item === '..') continue;
+                    $p = "$dir/$item";
+                    if (is_dir($p)) $iterator($p);
+                    else unlink($p);
+                }
+                rmdir($dir);
+            };
+            $iterator($path);
+            $msg = "Usunięto anime: $folder";
+        }
+    }
+
+    // ADD EPISODE
+    if (isset($_POST['add_episode'], $_POST['anime'])) {
+        $folder = safe_name($_POST['anime']);
+        if ($folder === '') {
+            $errors[] = 'Nieprawidłowa nazwa anime.';
+        }
+        $path = ANIME_DIR . "/$folder/odcinki";
+        if ($folder !== '' && !is_dir($path) && !mkdir($path, 0777, true)) {
+            $errors[] = 'Błąd tworzenia katalogu odcinków.';
+        }
+        $episodesFile = "$path/episodes.json";
+        $list = file_exists($episodesFile) ? json_decode(file_get_contents($episodesFile), true) : [];
+        if (!is_array($list)) $list = [];
+
+        $num    = intval($_POST['epnum']);
+        if ($num <= 0) $num = count($list) + 1;
+        $title  = sanitize_text($_POST['eptitle']);
+        $audio  = sanitize_text($_POST['audio']);
+        $subs   = sanitize_text($_POST['subs']);
+        $host   = sanitize_text($_POST['host']);
+
+        $entry = [
+            'number' => $num,
+            'title'  => $title ?: "Odcinek $num",
+            'audio'  => $audio ?: 'PL',
+            'subs'   => $subs ?: 'PL',
+            'host'   => $host ?: 'LOCAL'
+        ];
+        if ($entry['host'] === 'LOCAL') {
+            if (!empty($_FILES['epfile']['tmp_name'])) {
+                $fname = $num . '_' . uniqid() . '.mp4';
+                if (move_uploaded_file($_FILES['epfile']['tmp_name'], "$path/$fname")) {
+                    $entry['file']     = $fname;
+                    $entry['filename'] = $fname;
+                } else {
+                    $errors[] = 'Nie zapisano odcinka.';
+                }
+            } else {
+                $errors[] = 'Brak pliku odcinka.';
+            }
+        } else {
+            $url = trim($_POST['epurl']);
+            if (filter_var($url, FILTER_VALIDATE_URL)) {
+                $entry['url'] = $url;
+                $entry['host'] = detect_host($url);
+                $slug = $title ? preg_replace('/[^A-Za-z0-9_-]+/', '_', $title) : basename(parse_url($url, PHP_URL_PATH));
+                if ($slug === '' || $slug === false) $slug = 'url_' . uniqid();
+                $entry['file'] = $slug;
+                $entry['filename'] = $slug;
+            } else {
+                $errors[] = 'Błędny URL odcinka.';
+            }
+        }
+
+        if (empty($errors)) {
+            $list[] = $entry;
+            file_put_contents($episodesFile, json_encode($list, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            $msg = "Dodano odcinek: {$entry['title']}";
+        }
+    }
+
+    // DELETE EPISODE
+    if (isset($_POST['del_episode'], $_POST['anime'], $_POST['epfile'])) {
+        $folder = safe_name($_POST['anime']);
+        $epfile = basename($_POST['epfile']);
+        $epath = ANIME_DIR . "/$folder/odcinki/$epfile";
+        $episodesFile = ANIME_DIR . "/$folder/odcinki/episodes.json";
+        $list = file_exists($episodesFile) ? json_decode(file_get_contents($episodesFile), true) : [];
+        if (file_exists($epath)) {
+            if (!unlink($epath)) {
+                $errors[] = 'Nie można usunąć odcinka.';
+            }
+        }
+        if (is_array($list)) {
+            $list = array_values(array_filter($list, function($e) use ($epfile) {
+                return !(isset($e['filename']) && $e['filename'] === $epfile);
+            }));
+            file_put_contents($episodesFile, json_encode($list, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            $msg = "Usunięto odcinek: $epfile";
+        }
+    }
+}
+
+if ($ajax) {
+    header('Content-Type: application/json');
+    if ($errors) {
+        echo json_encode(['status' => 'error', 'errors' => $errors]);
+    } else {
+        echo json_encode(['status' => 'ok', 'msg' => isset($msg) ? $msg : '']);
+    }
+    exit;
+} else {
+    foreach ($errors as $e) add_flash('error', $e);
+    if (!empty($msg)) add_flash('success', $msg);
+}
+?>
+
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ogladajanime.pl – Kolekcja Anime</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="css/css.css">
+  <style>
+    body { background-color: #000; }
+    .episode-list a.watched { opacity: .7; }
+
+    .featured-section { margin-bottom: 2rem; }
+    .featured-section h3 { font-size: 1.4rem; margin-bottom: 0.5rem; }
+    .featured-grid { display: flex; flex-wrap: wrap; gap: 1rem; }
+    .featured-tile { position: relative; flex: 1 1 calc(50% - 1rem); max-width: calc(50% - 1rem); text-decoration: none; color: inherit; }
+    .featured-tile img { width: 100%; height: 200px; object-fit: cover; border-radius: 8px; }
+    .featured-title { position: absolute; bottom: 8px; left: 8px; right: 8px; background: rgba(0,0,0,0.6); color: #fff; padding: 0.3rem 0.5rem; border-radius: 4px; font-weight: 700; text-align: center; }
+    @media (min-width: 768px) {
+      .featured-tile { flex: 1 1 calc(25% - 1rem); max-width: calc(25% - 1rem); }
+      .featured-tile img { height: 240px; }
+    }
+
+    .continue-card {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      padding: 1rem;
+      border-radius: 8px;
+      text-decoration: none;
+      background: rgba(255,255,255,0.6);
+      border: 1px solid rgba(0,0,0,0.1);
+    }
+    .continue-card img { width: 90px; height: 135px; object-fit: cover; border-radius: 4px; }
+    .continue-card .continue-info h4 { margin: 0 0 .3rem; font-size: 1.1rem; }
+    .continue-card .continue-info p { margin: 0; font-size: .9rem; }
+
+    .watch-layout {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 1rem;
+    }
+    .watch-layout .episode-list {
+      flex: 0 0 20%;
+      max-width: 20%;
+      overflow-y: auto;
+    }
+    .watch-layout .video-player {
+      flex: 1 1 60%;
+      max-width: 60%;
+      padding: 4px;
+    }
+    .video-player .video-wrapper {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;
+      border: 1px solid #444;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .video-wrapper video,
+    .video-wrapper iframe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+    .watch-layout .season-list {
+      flex: 0 0 20%;
+      max-width: 20%;
+      overflow-y: auto;
+    }
+    @media (max-width: 768px) {
+      .watch-layout {
+        flex-direction: column;
+      }
+      .watch-layout .episode-list,
+      .watch-layout .video-player,
+      .watch-layout .season-list {
+        flex: 1 1 100%;
+        max-width: 100%;
+      }
+    }
+
+    .anime-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .anime-grid .anime-tile {
+      flex: 1 1 calc(50% - 1rem);
+      max-width: calc(50% - 1rem);
+      text-decoration: none;
+      color: inherit;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      transition: transform 0.2s, box-shadow 0.2s;
+      background: rgba(255,255,255,0.6);
+    }
+    @media (min-width: 768px) {
+      .anime-grid .anime-tile {
+        flex: 1 1 calc(25% - 1rem);
+        max-width: calc(25% - 1rem);
+      }
+    }
+    .anime-grid .anime-tile:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+    }
+    .anime-grid .anime-tile img {
+      width: 100%;
+      height: 180px;
+      object-fit: cover;
+    }
+    .anime-grid .anime-title {
+      padding: 0.5rem;
+      font-weight: 700;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-left">ogladajanime.pl</div>
+  <div class="nav-center">
+    <a href="./"<?php if(!isset($_GET['panel'])&&!isset($_GET['anime'])) echo ' aria-current="page"';?>>Anime</a>
+    <a href="?random=1">Losowe</a>
+    <?php if($can_admin && is_admin()): ?>
+      <a href="?panel=admin"<?php if(@$_GET['panel']=='admin') echo ' aria-current="page"';?>>Panel Admina</a>
+      <a href="?logout">Wyloguj</a>
+    <?php elseif($can_admin): ?>
+      <a href="?panel=login"<?php if(@$_GET['panel']=='login') echo ' aria-current="page"';?>>Logowanie</a>
+    <?php endif; ?>
+    <?php if(!isset($_GET['anime']) && @$_GET['panel'] !== 'login'): ?>
+      <form method="get" class="nav-search" id="searchForm" autocomplete="off">
+        <input id="search-input" type="text" name="q" placeholder="Wyszukaj anime..." aria-label="Wyszukaj anime" value="<?=h(isset($_GET['q']) ? $_GET['q'] : '')?>">
+        <button type="submit" title="Szukaj" class="search-btn">🔍</button>
+        <button type="button" title="Zaawansowane" id="open-tags" class="plus-btn">+</button>
+      </form>
+    <?php endif; ?>
+  </div>
+  <div class="nav-right">
+    <button id="theme-toggle" class="btn btn-sm btn-outline-secondary">&#9790;</button>
+  </div>
+
+<?php
+$all_tags = ['akcja','isekai','romans','ecchi','przygodowe','komedia','sci-fi','dramat','psychologiczne','fantasy','sport','szkolne'];
+?>
+<?php if(!isset($_GET['anime']) && @$_GET['panel'] !== 'login'): ?>
+  <div class="tags-modal" id="tags-modal" style="display:none;">
+    <div class="tags-modal-content">
+      <h3>Wybierz tagi</h3>
+      <form method="get" class="tags-checkboxes">
+        <input type="hidden" name="q" value="<?=h(isset($_GET['q']) ? $_GET['q'] : '')?>">
+        <?php foreach($all_tags as $tag): ?>
+          <label>
+            <input type="checkbox" name="tag[]" value="<?=h($tag)?>"
+              <?php if(!empty($_GET['tag']) && in_array($tag, (array)$_GET['tag'])) echo 'checked'; ?>>
+            <?=h(ucfirst($tag))?>
+          </label>
+        <?php endforeach; ?>
+        <div class="tags-modal-actions">
+          <button type="submit" class="search-btn">Szukaj</button>
+          <button type="button" id="close-tags" class="close-btn">Anuluj</button>
+        </div>
+      </form>
+    </div>
+    <div class="tags-modal-bg"></div>
+  </div>
+  <script>
+    document.getElementById('open-tags').onclick = function(e) {
+      e.preventDefault();
+      document.getElementById('tags-modal').style.display = 'flex';
+    }
+    document.getElementById('close-tags').onclick = function(e) {
+      e.preventDefault();
+      document.getElementById('tags-modal').style.display = 'none';
+    }
+    document.querySelector('.tags-modal-bg').onclick = function() {
+      document.getElementById('tags-modal').style.display = 'none';
+    }
+  </script>
+<?php endif; ?>
+
+</nav>
+<main class="container my-4">
+<?php foreach($flashes as $f): ?>
+  <div class="alert <?= $f['type']=='error' ? 'alert-danger' : 'alert-success' ?> flash" role="alert">
+    <?=h($f['msg'])?>
+  </div>
+<?php endforeach; ?>
+<?php
+if (isset($_GET['panel']) && $_GET['panel']==='login' && !is_admin()) { ?>
+  <h2>Panel logowania admina</h2>
+  <form method="post" class="mt-3" style="max-width:400px;">
+    <input type="hidden" name="csrf" value="<?=h(get_csrf_token())?>">
+    <div class="mb-3">
+      <label for="login" class="form-label">Login</label>
+      <input id="login" name="login" class="form-control" required>
+    </div>
+    <div class="mb-3">
+      <label for="pass" class="form-label">Hasło</label>
+      <input id="pass" name="pass" type="password" class="form-control" required>
+    </div>
+    <?php if(!empty($login_error)) echo "<div class='text-danger'>$login_error</div>"; ?>
+    <button type="submit" class="btn btn-primary">Zaloguj się</button>
+  </form>
+<?php
+} elseif ($can_admin && isset($_GET['panel']) && $_GET['panel'] === 'admin' && is_admin()) {
+  $anime_dirs = get_anime_list();
+  $admin_q = isset($_GET['admin_q']) ? $_GET['admin_q'] : '';
+
+  if ($admin_q) {
+    $anime_dirs = array_filter($anime_dirs, function($f) use ($admin_q) {
+      $a = load_anime_data($f);
+      return stripos($a['title'], $admin_q) !== false || stripos(implode(',', $a['genres']), $admin_q) !== false;
+    });
+  }
+
+  $anime_dirs = array_values($anime_dirs);
+  $admin_page = max(1, (int)(isset($_GET['admin_page']) ? $_GET['admin_page'] : 1));
+  $per_admin = 8;
+  $total_admin = count($anime_dirs);
+  $pages_admin = ceil($total_admin / $per_admin);
+  $page_admin_list = array_slice($anime_dirs, ($admin_page - 1) * $per_admin, $per_admin);
+?>
+  <h2>Panel administracyjny</h2>
+  <button class="add-anime-btn" onclick="openAnimeModal('add')">+ Dodaj anime</button>
+
+  <form method="get" class="admin-search-bar d-flex gap-2 my-2" style="max-width:400px;">
+    <input type="hidden" name="panel" value="admin">
+    <input id="admin-search" type="text" name="admin_q" aria-label="Wyszukaj anime (admin)" value="<?=h($admin_q)?>" placeholder="Wyszukaj anime..." class="form-control">
+    <button type="submit" class="btn btn-secondary">🔍</button>
+  </form>
+
+  <div class="admin-anime-grid">
+    <?php foreach($page_admin_list as $f):
+      $anime = load_anime_data($f); ?>
+      <div class="admin-anime-tile" onclick='openAnimeModal("edit", <?=htmlspecialchars(json_encode($anime), ENT_QUOTES)?>)'>
+        <img src="<?=h($anime['cover'])?>" alt="<?=h($anime['title'])?>">
+        <div class="title"><?=show_name($anime['title'])?></div>
+        <div class="count"><?=count($anime['episodes'])?> odc.</div>
+      </div>
+    <?php endforeach; ?>
+  </div>
+
+  <?php if($pages_admin > 1): ?>
+    <nav class="pagination">
+      <?php for($i = 1; $i <= $pages_admin; $i++): ?>
+        <a class="<?= $i == $admin_page ? 'active' : '' ?>" href="?panel=admin&admin_page=<?=$i?>&admin_q=<?=urlencode($admin_q)?>"><?=$i?></a>
+      <?php endfor; ?>
+    </nav>
+  <?php endif; ?>
+
+  <div class="admin-modal-bg" id="anime-modal-bg">
+    <div class="admin-modal" id="anime-modal" style="max-width:700px;">
+      <button class="close-modal" onclick="closeAnimeModal()">&times;</button>
+      <div id="anime-modal-content"></div>
+    </div>
+  </div>
+
+<?php
+}
+elseif (isset($_GET['anime'])) {
+  $anime = load_anime_data(safe_name($_GET['anime']));
+  $all_anime = get_anime_list();
+  $anime_datas = [];
+
+  foreach ($all_anime as $f) {
+    $a = load_anime_data($f);
+    if ($a['series'] === $anime['series']) $anime_datas[$f] = $a;
+  }
+
+  usort($anime_datas, function($a, $b) {
+    return intval($a['season_number']) - intval($b['season_number']);
+  });
+  $prev_data = null;
+  $next_data = null;
+  $index = array_search($anime['folder'], array_column($anime_datas, 'folder'));
+  if ($index !== false) {
+    if ($index > 0) $prev_data = $anime_datas[$index - 1];
+    if ($index < count($anime_datas) - 1) $next_data = $anime_datas[$index + 1];
+  }
+  if (!empty($anime['prev_season'])) {
+    foreach ($anime_datas as $a) { if ($a['folder']===$anime['prev_season']) { $prev_data=$a; break; } }
+  }
+  if (!empty($anime['next_season'])) {
+    foreach ($anime_datas as $a) { if ($a['folder']===$anime['next_season']) { $next_data=$a; break; } }
+  }
+?>
+
+  <article>
+    <div class="anime-header">
+      <img src="<?=h($anime['cover'])?>" alt="Okładka" style="height:220px;border-radius:8px;">
+      <div class="anime-info">
+        <h2><?=show_name($anime['title'])?></h2>
+        <p><?=nl2br(h($anime['desc']))?></p>
+        <p>Tagi: <?=implode(', ', array_map('h', $anime['genres']))?></p>
+      </div>
+    </div>
+
+    <div class="watch-layout">
+      <?php
+$episodes = [];
+$base = ANIME_DIR . '/' . $anime['folder'] . '/odcinki';
+if (file_exists("$base/episodes.json")) {
+    $episodes = json_decode(file_get_contents("$base/episodes.json"), true) ?: [];
+    foreach ($episodes as &$e) {
+        if (!isset($e['file']) && isset($e['filename'])) $e['file'] = $e['filename'];
+        if (!isset($e['filename']) && isset($e['file'])) $e['filename'] = $e['file'];
+        if (!isset($e['title'])) $e['title'] = format_episode_title($e['file']);
+    }
+    unset($e);
+}
+if (!$episodes) {
+    foreach (glob("$base/*.mp4") as $i => $file) {
+        $name = basename($file);
+        $episodes[] = [
+            'number'   => $i+1,
+            'title'    => format_episode_title($name),
+            'audio'    => 'PL',
+            'subs'     => 'PL',
+            'host'     => 'LOCAL',
+            'file'     => $name,
+            'filename' => $name
+        ];
+    }
+}
+
+$current_ep    = isset($_GET['ep'])    ? $_GET['ep']    : (isset($episodes[0]['number']) ? $episodes[0]['number'] : 1);
+$current_audio = isset($_GET['audio']) ? $_GET['audio'] : (isset($episodes[0]['audio']) ? $episodes[0]['audio'] : 'PL');
+$current_subs  = isset($_GET['subs'])  ? $_GET['subs']  : (isset($episodes[0]['subs'])  ? $episodes[0]['subs']  : 'PL');
+$current_host  = isset($_GET['host'])  ? $_GET['host']  : (isset($episodes[0]['host'])  ? $episodes[0]['host']  : 'LOCAL');
+
+function ep_display_title($ep) {
+    $title = isset($ep['title']) ? $ep['title'] : (isset($ep['file']) ? format_episode_title($ep['file']) : '');
+    $title = htmlspecialchars($title, ENT_QUOTES);
+    return $ep['number'] . '. ' . $title;
+}
+?>
+
+<div class="episode-list">
+  <ul class="list-group list-group-flush">
+    <?php
+      $seen = [];
+      foreach($episodes as $ep):
+        $key = $ep['number']."|".$ep['audio']."|".$ep['subs'];
+        if(isset($seen[$key])) continue;
+        $seen[$key] = true;
+        $active = ($ep['number']==$current_ep && $ep['audio']==$current_audio && $ep['subs']==$current_subs);
+        $url = "?anime=".urlencode($anime['folder'])
+             ."&ep={$ep['number']}&audio={$ep['audio']}&subs={$ep['subs']}&host={$ep['host']}";
+    ?>
+      <li class="list-group-item d-flex justify-content-between align-items-center <?= $active ? 'active' : '' ?>">
+        <a href="<?= $url ?>" data-episode="<?=h($ep['file'])?>"
+           data-folder="<?=h($anime['folder'])?>"
+           data-epnum="<?=h($ep['number'])?>"
+           data-title="<?=h($ep['title'])?>"
+           data-audio="<?=h($ep['audio'])?>"
+           data-subs="<?=h($ep['subs'])?>"
+           data-host="<?=h($ep['host'])?>"
+           data-cover="<?=h($anime['cover'])?>">
+          <?= ep_display_title($ep) ?>
+        </a>
+      </li>
+    <?php endforeach; ?>
+  </ul>
+</div>
+
+<?php
+$current = null;
+foreach($episodes as $ep) {
+  if ($ep['number']==$current_ep
+      && $ep['audio']==$current_audio
+      && $ep['subs']==$current_subs
+      && $ep['host']==$current_host) {
+    $current = $ep; break;
+  }
+}
+?>
+<div class="video-player">
+  <?php if($current): ?>
+    <?php if($current['host']==='LOCAL' && $current['filename']): ?>
+      <div class="video-wrapper">
+        <video src="anime/<?=h($anime['folder'])?>/odcinki/<?=h($current['filename'])?>" controls></video>
+      </div>
+<?php elseif($current['host']!=='LOCAL' && $current['url']): ?>
+  <?php $embed = embed_url($current['url'], $current['host']); ?>
+  <?php if($embed !== $current['url']): ?>
+      <div class="video-wrapper">
+        <iframe src="<?=h($embed)?>" allowfullscreen
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"></iframe>
+      </div>
+  <?php else: ?>
+    <a class="anime-url-btn" href="<?=h($current['url'])?>" target="_blank">
+      Otwórz odcinek <?=ep_display_title($current)?>
+    </a>
+  <?php endif; ?>
+<?php endif; ?>
+    <div style="margin-top:1em;">
+      <b>Dźwięk:</b> <?=h($current['audio'])?> |
+      <b>Napisy:</b> <?=h($current['subs'])?> |
+      <b>Host:</b> <?=h($current['host'])?>
+    </div>
+
+    <?php
+      $host_opts = [];
+      foreach($episodes as $e){
+        if($e['number']==$current_ep && $e['audio']==$current_audio && $e['subs']==$current_subs)
+          $host_opts[] = $e['host'];
+      }
+      $host_opts = array_unique($host_opts);
+    ?>
+    <form method="get" class="mt-2">
+      <input type="hidden" name="anime" value="<?=h($anime['folder'])?>">
+      <input type="hidden" name="ep" value="<?=h($current_ep)?>">
+      <input type="hidden" name="audio" value="<?=h($current_audio)?>">
+      <input type="hidden" name="subs" value="<?=h($current_subs)?>">
+      <select name="host" onchange="this.form.submit()" class="form-select form-select-sm" style="width:auto;display:inline-block;">
+        <?php foreach($host_opts as $hopt): ?>
+          <option value="<?=h($hopt)?>" <?= $hopt==$current_host?'selected':''?>><?=h($hopt)?> (<?=h($current_audio)?>/<?=h($current_subs)?>)</option>
+        <?php endforeach; ?>
+      </select>
+    </form>
+
+  <?php endif; ?>
+</div>
+
+      <div class="season-list">
+        <ul class="list-group">
+          <?php foreach($anime_datas as $a): ?>
+            <li class="list-group-item <?= $a['folder'] === $anime['folder'] ? 'active' : '' ?>">
+              <a href="?anime=<?=urlencode($a['folder'])?>">Sezon <?=h($a['season_number'])?> (<?=count($a['episodes'])?>)</a>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+        <div class="d-flex justify-content-between mt-2">
+          <?php if($prev_data): ?>
+            <a class="btn btn-secondary" href="?anime=<?=urlencode($prev_data['folder'])?>">&laquo; Sezon <?=h($prev_data['season_number'])?></a>
+          <?php endif; ?>
+          <?php if($next_data): ?>
+            <a class="btn btn-secondary ms-auto" href="?anime=<?=urlencode($next_data['folder'])?>">Sezon <?=h($next_data['season_number'])?> &raquo;</a>
+          <?php endif; ?>
+        </div>
+      </div>
+    </div>
+
+    <p style="margin-top:2rem;"><a href="./">⟵ Powrót</a></p>
+  </article>
+
+<?php
+} else {
+  $anime_dirs = get_anime_list();
+  $q = isset($_GET['q']) ? $_GET['q'] : '';
+  $sort = isset($_GET['sort']) ? $_GET['sort'] : '';
+  $page = max(1, (int)(isset($_GET['page']) ? $_GET['page'] : 1));
+  $per_page = 8;
+  $tags = isset($_GET['tag']) ? $_GET['tag'] : [];
+  if (!is_array($tags)) $tags = [$tags];
+
+  $filtered = [];
+  foreach ($anime_dirs as $f) {
+    $a = load_anime_data($f);
+    $genres = array_map('trim', $a['genres']);
+    $hasTags = empty($tags) || count(array_intersect($tags, $genres)) === count($tags);
+
+    if (
+      (!$q || stripos($a['title'], $q) !== false || stripos(implode(',', $a['genres']), $q) !== false)
+      && $hasTags
+    ) {
+      $filtered[] = $a;
+    }
+  }
+
+  $featured = [];
+  if (!$q && empty($tags)) {
+    $featured = get_featured_anime($anime_dirs, FEATURED_COUNT);
+  }
+
+  if ($sort === 'titleaz') {
+    usort($filtered, function($a, $b) { return strcmp($a['title'], $b['title']); });
+  }
+  if ($sort === 'titleza') {
+    usort($filtered, function($a, $b) { return strcmp($b['title'], $a['title']); });
+  }
+
+  $total = count($filtered);
+  $pages = ceil($total / $per_page);
+  $page_list = array_slice($filtered, ($page - 1) * $per_page, $per_page);
+?>
+
+  <?php if (!empty($featured)): ?>
+    <div class="featured-section">
+      <h3>Polecane anime</h3>
+      <div class="featured-grid">
+      <?php foreach($featured as $item): ?>
+        <a class="featured-tile" href="?anime=<?=urlencode($item['folder'])?>">
+          <img src="<?=h($item['cover'])?>" alt="<?=h($item['title'])?>">
+          <div class="featured-title"><?=show_name($item['title'])?></div>
+        </a>
+      <?php endforeach; ?>
+      </div>
+    </div>
+  <?php endif; ?>
+
+  <?php if (empty($page_list)): ?>
+    <p>Brak anime.</p>
+  <?php else: ?>
+    <div class="anime-grid">
+      <?php foreach($page_list as $anime): ?>
+        <a class="anime-tile" href="?anime=<?=urlencode($anime['folder'])?>">
+          <img src="<?=h($anime['cover'])?>" alt="<?=h($anime['title'])?>">
+          <div class="anime-title"><?=show_name($anime['title'])?></div>
+        </a>
+      <?php endforeach; ?>
+    </div>
+
+    <?php if ($pages > 1): ?>
+      <nav class="pagination">
+        <?php for($i = 1; $i <= $pages; $i++): ?>
+          <a class="<?= $i === $page ? 'active' : '' ?>" href="?page=<?=$i?>&q=<?=urlencode($q)?>&sort=<?=urlencode($sort)?>"><?=$i?></a>
+        <?php endfor; ?>
+      </nav>
+    <?php endif; ?>
+  <?php endif; ?>
+<?php } ?>
+</main>
+
+<script>
+function openAnimeModal(type, anime = {}) {
+  document.getElementById('anime-modal-bg').classList.add('active');
+  const content = document.getElementById('anime-modal-content');
+  if(type === 'add') {
+    content.innerHTML = `
+      <h3>Dodaj anime</h3>
+      <form method="post" enctype="multipart/form-data" id="mal-form" class="mb-3" style="max-width:600px;">
+        <input type="hidden" name="csrf" value="<?=h(get_csrf_token())?>">
+        <!-- ukryty parametr, aby 'add_anime' pojawił się w FormData przy wysyłce AJAX -->
+        <input type="hidden" name="add_anime" value="1">
+        <div class="mb-3">
+          <label class="form-label">Pobierz z MyAnimeList</label>
+          <div class="input-group">
+            <input type="text" id="mal-id" name="mal_id" class="form-control" placeholder="ID lub tytuł z MAL">
+            <button type="button" class="btn btn-secondary" onclick="fetchMAL()">Pobierz</button>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label for="anime-title" class="form-label">Tytuł</label>
+          <input name="title" id="anime-title" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label for="anime-desc" class="form-label">Opis</label>
+          <textarea name="desc" id="anime-desc" class="form-control" required></textarea>
+        </div>
+        <div class="mb-3">
+          <label for="anime-genres" class="form-label">Tagi</label>
+          <input name="genres" id="anime-genres" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label for="anime-type" class="form-label">Typ</label>
+          <input name="type" id="anime-type" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label for="anime-series" class="form-label">Seria</label>
+          <input name="series" id="anime-series" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="anime-season" class="form-label">Nr sezonu</label>
+          <input name="season_number" id="anime-season" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="anime-prev" class="form-label">Poprzedni sezon</label>
+          <input name="prev_season" id="anime-prev" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="anime-next" class="form-label">Następny sezon</label>
+          <input name="next_season" id="anime-next" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="anime-cover-url" class="form-label">URL okładki</label>
+          <input name="cover_url" id="anime-cover-url" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Plik okładki</label>
+          <input type="file" name="cover" accept="image/*" class="form-control">
+        </div>
+        <button name="submit-btn" type="submit" class="btn btn-primary">Dodaj anime</button>
+      </form>
+      <small style="color:#888;">* Po pobraniu z MyAnimeList możesz poprawić dane ręcznie.</small>
+    `;
+  } else if(type === 'edit') {
+    content.innerHTML = `
+      <h3>Edycja: ${anime.title ? anime.title.replace(/[_-]/g,' ') : ''}</h3>
+      <form method="post" enctype="multipart/form-data" style="max-width:600px;">
+        <input type="hidden" name="csrf" value="<?=h(get_csrf_token())?>">
+        <input type="hidden" name="folder" value="${anime.folder || ''}">
+        <div class="mb-3">
+          <label for="edit-title" class="form-label">Tytuł</label>
+          <input name="title" id="edit-title" value="${anime.title||''}" required class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="edit-desc" class="form-label">Opis</label>
+          <textarea name="desc" id="edit-desc" class="form-control" required>${anime.desc||''}</textarea>
+        </div>
+        <div class="mb-3">
+          <label for="edit-genres" class="form-label">Tagi</label>
+          <input name="genres" id="edit-genres" value="${(anime.genres||[]).join(',')}" required class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="edit-type" class="form-label">Typ</label>
+          <input name="type" id="edit-type" value="${anime.type||''}" required class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="edit-series" class="form-label">Seria</label>
+          <input name="series" id="edit-series" value="${anime.series||''}" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="edit-season" class="form-label">Nr sezonu</label>
+          <input name="season_number" id="edit-season" value="${anime.season_number||''}" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="edit-prev" class="form-label">Poprzedni sezon</label>
+          <input name="prev_season" id="edit-prev" value="${anime.prev_season||''}" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label for="edit-next" class="form-label">Następny sezon</label>
+          <input name="next_season" id="edit-next" value="${anime.next_season||''}" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">URL okładki</label>
+          <input name="cover_url" class="form-control">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Plik okładki</label>
+          <input type="file" name="cover" accept="image/*" class="form-control">
+        </div>
+        <button name="edit_anime" class="btn btn-primary">Zapisz</button>
+        <button name="del_anime" onclick="return confirm('Usunąć anime?')" class="btn btn-danger ms-2">Usuń anime</button>
+      </form>
+      <h4>Odcinki:</h4>
+      ${(() => {
+        const groups = {};
+        (anime.episodes||[]).forEach(ep => {
+          if(!groups[ep.number]) groups[ep.number] = [];
+          groups[ep.number].push(ep);
+        });
+        const nums = Object.keys(groups).sort((a,b)=>a-b);
+        return nums.map(num => {
+          const eps = groups[num];
+          return `<div class="episode-group" style="margin-bottom:.5em;">
+            <div><b>Odcinek ${num}</b></div>
+            ${eps.map((ep,i)=>{
+              const previewSrc = ep.host==='LOCAL' ? 'anime/'+anime.folder+'/odcinki/'+ep.file : (ep.url||'');
+              // use Bootstrap buttons for preview and delete
+              const previewBtn = `<button type="button" class="btn btn-info btn-sm me-1" onclick="previewEpisode('${previewSrc}','${ep.host}')">Podgląd</button>`;
+              return `<div class="d-flex align-items-center" style="margin-left:1em;">
+                <span class="me-2">${num}.${i+1} ${ep.host}</span>
+                ${previewBtn}
+                <form method="post" style="display:inline;">
+                  <input type="hidden" name="csrf" value="<?=h(get_csrf_token())?>">
+                  <input type="hidden" name="anime" value="${anime.folder}">
+                  <input type="hidden" name="epfile" value="${ep.file}">
+                  <button name="del_episode" class="btn btn-danger btn-sm" onclick="return confirm('Usunąć odcinek?')">Usuń</button>
+                </form>
+              </div>`;
+            }).join('')}
+          </div>`;
+        }).join('');
+      })()}
+      <h4>Dodaj odcinek:</h4>
+      <form method="post" enctype="multipart/form-data" style="max-width:600px;">
+        <input type="hidden" name="csrf" value="<?=h(get_csrf_token())?>">
+        <input type="hidden" name="anime" value="${anime.folder}">
+        <div class="mb-2">
+          <label for="add-epnum" class="form-label">Numer</label>
+          <input id="add-epnum" type="number" name="epnum" min="1" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label for="add-eptitle" class="form-label">Tytuł</label>
+          <input id="add-eptitle" name="eptitle" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label for="add-audio" class="form-label">Audio</label>
+          <input id="add-audio" name="audio" value="PL" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label for="add-subs" class="form-label">Napisy</label>
+          <input id="add-subs" name="subs" value="PL" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label for="add-host" class="form-label">Host</label>
+          <select id="add-host" name="host" class="form-select">
+            <option value="LOCAL">Lokalny</option>
+            <option value="YOUTUBE">YouTube</option>
+            <option value="CDA">CDA</option>
+            <option value="GOOGLE">Google</option>
+            <option value="MEGA">Mega</option>
+            <option value="VK">VK</option>
+            <option value="RUMBLE">Rumble</option>
+            <option value="SIBNET">Sibnet</option>
+            <option value="LULU">Lulu</option>
+            <option value="MP4UPLOAD">MP4Upload</option>
+            <option value="URL" selected>Inny</option>
+          </select>
+        </div>
+        <div class="mb-2">
+          <label for="add-epfile" class="form-label">Plik</label>
+          <input id="add-epfile" type="file" name="epfile" accept=".mp4" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label for="add-epurl" class="form-label">URL</label>
+          <input id="add-epurl" name="epurl" class="form-control">
+        </div>
+        <input type="hidden" name="add_episode" value="1">
+        <button class="btn btn-primary">Dodaj odcinek</button>
+      </form>
+    `;
+    const urlInput = document.getElementById('add-epurl');
+    const hostSel = document.getElementById('add-host');
+    if(urlInput && hostSel){
+      urlInput.addEventListener('input', function(){ hostSel.value = detectHostJS(this.value); });
+    }
+  }
+}
+function closeAnimeModal() {
+  document.getElementById('anime-modal-bg').classList.remove('active');
+}
+function fetchMAL() {
+  var id = document.getElementById('mal-id').value.trim();
+  if(!id) { alert('Podaj ID lub tytuł z MyAnimeList!'); return; }
+  let url = '';
+  if(/^\d+$/.test(id)) url = 'https://api.jikan.moe/v4/anime/' + id;
+  else url = 'https://api.jikan.moe/v4/anime?q=' + encodeURIComponent(id) + '&limit=1';
+  fetch(url).then(res=>res.json()).then(data=>{
+    let anime = (data.data && data.data.length) ? data.data[0] : (data.data||data);
+    if(anime && anime.title) {
+      document.getElementById('anime-title').value = anime.title || '';
+      document.getElementById('anime-desc').value = (anime.synopsis||'').replace(/\n+/g,' ');
+      document.getElementById('anime-genres').value = (anime.genres||[]).map(g=>g.name).join(',');
+      document.getElementById('anime-type').value = anime.type || '';
+      document.getElementById('anime-cover-url').value = (anime.images && anime.images.jpg && anime.images.jpg.image_url) ? anime.images.jpg.image_url : '';
+    } else {
+      alert('Nie znaleziono anime!');
+    }
+  }).catch(()=>alert('Błąd pobierania z MyAnimeList (Jikan API)!'));
+}
+
+function detectHostJS(url){
+  try { var h = new URL(url).hostname.replace(/^www\./,'').toLowerCase(); } catch(e){ return 'URL'; }
+  if(h.includes('youtu')) return 'YOUTUBE';
+  if(h.includes('cda.pl')) return 'CDA';
+  if(h.includes('drive.google')) return 'GOOGLE';
+  if(h.includes('mega.nz')) return 'MEGA';
+  if(h.includes('vk.com')) return 'VK';
+  if(h.includes('rumble.com')) return 'RUMBLE';
+  if(h.includes('sibnet.ru')) return 'SIBNET';
+  if(h.includes('lulu')) return 'LULU';
+  if(h.includes('mp4upload.com')) return 'MP4UPLOAD';
+  if(h.includes('short.')) return 'SHORT';
+  return h.toUpperCase();
+}
+
+function embedUrlJS(url, host){
+  host = (host||'URL').toUpperCase();
+  if(host === 'URL') host = detectHostJS(url);
+  let embed = url;
+  if(host === 'YOUTUBE'){
+    const m = url.match(/(?:v=|be\/|embed\/)([\w-]+)/);
+    if(m) embed = 'https://www.youtube.com/embed/' + m[1];
+    embed += embed.includes('?') ? '&fs=1' : '?fs=1';
+  } else if(host === 'CDA'){
+    const m = url.match(/([\w\d]{8})(?:$|\?)/);
+    if(m) embed = 'https://ebd.cda.pl/620x368/' + m[1];
+    embed += embed.includes('?') ? '&allowfullscreen=1' : '?allowfullscreen=1';
+  } else if(host === 'GOOGLE'){
+    const m = url.match(/\/d\/([^\/]+)/);
+    if(m) embed = 'https://drive.google.com/file/d/' + m[1] + '/preview';
+    embed += embed.includes('?') ? '&allowfullscreen=1' : '?allowfullscreen=1';
+  } else if(host === 'MEGA'){
+    const m = url.match(/\/file\/([^#]+)#(.+)/);
+    if(m) embed = 'https://mega.nz/embed/' + m[1] + '#' + m[2];
+    embed += embed.includes('?') ? '&allowfullscreen=1' : '?allowfullscreen=1';
+  } else if(host === 'RUMBLE'){
+    const m = url.match(/(v[\w]+)/);
+    if(m) embed = 'https://rumble.com/embed/' + m[1];
+    embed += embed.includes('?') ? '&allowfullscreen=1' : '?allowfullscreen=1';
+  } else if(host === 'SIBNET'){
+    const m = url.match(/(?:videoid=|\/)(\d{4,})/);
+    if(m) embed = 'https://video.sibnet.ru/shell.php?videoid=' + m[1];
+    embed += embed.includes('?') ? '&allowfullscreen=1' : '?allowfullscreen=1';
+  } else if(host === 'MP4UPLOAD'){
+    const m = url.match(/[?&]v=([\w]+)/) || url.match(/embed-([\w]+)/) || url.match(/\/([\w]+)\.html/);
+    if(m) embed = 'https://www.mp4upload.com/embed-' + m[1] + '.html';
+    embed += embed.includes('?') ? '&allowfullscreen=1' : '?allowfullscreen=1';
+  }
+  return embed;
+}
+
+function previewEpisode(src, host) {
+  // Normalize host
+  host = (host || 'LOCAL').toUpperCase();
+  // Open a new window
+  const win = window.open('', '_blank', 'width=960,height=540,resizable=yes,scrollbars=no');
+  if (!win) return;
+  let content;
+  if (host === 'LOCAL' || /\.(mp4|webm|mkv|ogg)$/i.test(src)) {
+    // local video
+    content = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Podgląd</title>
+        <style>
+          body { margin: 0; background: #000; height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+          .video-wrapper { position: relative; width: 90%; max-width: 960px; padding-top: 56.25%; }
+          .video-wrapper video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+          .close-btn { position: absolute; top: 10px; right: 10px; background: #fff; color: #000; border: none; padding: 4px 8px; font-size: 16px; cursor: pointer; border-radius: 4px; }
+        </style>
+      </head>
+      <body>
+        <button class="close-btn" onclick="window.close()">&#x2715;</button>
+        <div class="video-wrapper">
+          <video src="${src}" controls></video>
+        </div>
+      </body>
+      </html>`;
+  } else {
+    const embed = embedUrlJS(src, host);
+    content = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Podgląd</title>
+        <style>
+          body { margin: 0; background: #000; height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+          .video-wrapper { position: relative; width: 90%; max-width: 960px; padding-top: 56.25%; }
+          .video-wrapper iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+          .close-btn { position: absolute; top: 10px; right: 10px; background: #fff; color: #000; border: none; padding: 4px 8px; font-size: 16px; cursor: pointer; border-radius: 4px; }
+        </style>
+      </head>
+      <body>
+        <button class="close-btn" onclick="window.close()">&#x2715;</button>
+        <div class="video-wrapper">
+          <iframe src="${embed}" allowfullscreen
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"></iframe>
+        </div>
+      </body>
+      </html>`;
+  }
+  win.document.write(content);
+  win.document.close();
+}
+
+async function submitAdminForm(form, submitter) {
+  const fd = submitter ? new FormData(form, submitter) : new FormData(form);
+  fd.append('ajax','1');
+  const res = await fetch('', {method:'POST', body: fd});
+  const data = await res.json();
+  if(data.status === 'ok') {
+    showFlash(data.msg || 'OK', 'success');
+    setTimeout(()=>location.reload(), 500);
+  } else if(data.errors) {
+    showFlash(data.errors.join('\n'), 'error');
+  }
+}
+
+function showFlash(text, type) {
+  const div = document.createElement('div');
+  div.className = 'alert ' + (type==='error' ? 'alert-danger' : 'alert-success') + ' flash';
+  div.textContent = text;
+  document.querySelector('main').prepend(div);
+  setTimeout(()=>div.remove(),5000);
+}
+
+document.addEventListener('submit', function(e){
+  if(e.target.closest('#anime-modal')){
+    e.preventDefault();
+    submitAdminForm(e.target, e.submitter);
+  }
+});
+
+document.querySelectorAll('.flash').forEach(el=>{
+  setTimeout(()=>el.remove(),5000);
+});
+
+document.addEventListener('DOMContentLoaded', function(){
+  const folderKey = 'watched_<?=h($anime['folder'] ?? '')?>';
+  let watched = {};
+  try { watched = JSON.parse(localStorage.getItem(folderKey)) || {}; } catch(e) {}
+  document.querySelectorAll('.episode-list a[data-episode]').forEach(function(el){
+    const ep = el.dataset.episode;
+    if(watched[ep]) el.classList.add('watched');
+    el.addEventListener('click', function(){
+      watched[ep] = true;
+      localStorage.setItem(folderKey, JSON.stringify(watched));
+      const lastObj = {
+        folder: el.dataset.folder,
+        ep: el.dataset.epnum,
+        title: el.dataset.title || el.textContent.trim(),
+        audio: el.dataset.audio,
+        subs: el.dataset.subs,
+        host: el.dataset.host,
+        cover: el.dataset.cover
+      };
+      try {
+        localStorage.setItem('lastWatched', JSON.stringify(lastObj));
+      } catch(e){}
+    });
+  });
+
+  const themeBtn = document.getElementById('theme-toggle');
+  if(themeBtn){
+    const current = localStorage.getItem('theme') || 'light';
+    document.documentElement.setAttribute('data-bs-theme', current);
+    themeBtn.addEventListener('click', function(){
+      const t = document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-bs-theme', t);
+      localStorage.setItem('theme', t);
+    });
+  }
+  const showContinue = document.querySelector('.anime-grid') || document.querySelector('.featured-grid');
+  if(showContinue){
+    const last = localStorage.getItem('lastWatched');
+    if(last){
+      try {
+        const data = JSON.parse(last);
+        if(data && data.folder && data.cover){
+          const cont = document.createElement('a');
+          cont.href = '?anime=' + encodeURIComponent(data.folder) + '&ep=' + encodeURIComponent(data.ep) + '&audio=' + encodeURIComponent(data.audio) + '&subs=' + encodeURIComponent(data.subs) + '&host=' + encodeURIComponent(data.host);
+          cont.className = 'continue-card';
+          cont.innerHTML = '<img src="' + data.cover + '" alt=""><div class="continue-info"><h4>Kontynuuj oglądanie</h4><p>' + data.title + '</p><p>Odcinek ' + data.ep + ' (' + data.audio + '/' + data.subs + ', ' + data.host + ')</p></div>';
+          document.querySelector('main').prepend(cont);
+        }
+      } catch(e){}
+    }
+  }
+});
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+</body>
+</html>
